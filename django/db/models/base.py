@@ -289,12 +289,29 @@ class Model(object):
     def _get_pk_val(self, meta=None):
         if not meta:
             meta = self._meta
-        return getattr(self, meta.pk.attname)
+        if len(meta.pks) == 1:
+            return getattr(self, meta.pk.attname)
+        return self._get_pk_vals()
+    
+    def _get_pk_vals(self, meta=None):
+        if not meta:
+            meta = self._meta
+        return [getattr(self, f.attname) for f in meta.pks]
 
-    def _set_pk_val(self, value):
-        return setattr(self, self._meta.pk.attname, value)
+    def _set_pk_val(self, values):
+        # Not quite sure why anyone would use a dictionary here,
+        # but it's supported to keep it in line with filter()
+        if isinstance(values, dict):
+            for key, val in value.iteritems():
+                setattr(self, key, val)
+        else:
+            if not hasattr(values, '__iter__') and len(self._meta.pks) == 1:
+                values = [values,]
+            for field_name, idx in izip(self._meta.pk.attnames, xrange(len(self._meta.pks))):
+                setattr(self, field_name, values[idx])
 
     pk = property(_get_pk_val, _set_pk_val)
+    pks = property(_get_pk_vals, _set_pk_val)
 
     def save(self, force_insert=False, force_update=False):
         """
@@ -335,12 +352,18 @@ class Model(object):
         # that might have come from the parent class - we just save the
         # attributes we have been given to the class we have been given.
         if not raw:
+            # TODO: GAHHHHHHH
             for parent, field in meta.parents.items():
                 # At this point, parent's primary key field may be unknown
                 # (for example, from administration form which doesn't fill
                 # this field). If so, fill it.
-                if getattr(self, parent._meta.pk.attname) is None and getattr(self, field.attname) is not None:
-                    setattr(self, parent._meta.pk.attname, getattr(self, field.attname))
+
+                # TODO: test that this is good enough
+                if getattr(self, parent._meta.pks[0].attname) is None and getattr(self, field.attname) is None:
+                # if getattr(self, parent._meta.pk.attname) is None and getattr(self, field.attname) is not None:
+                    for f in parent._meta.pks:
+                        setattr(self, f.attname, getattr(self, field.attname))
+                    # setattr(self, parent._meta.pk.attname, getattr(self, field.attname))
 
                 self.save_base(raw, parent)
                 setattr(self, field.attname, self._get_pk_val(parent._meta))
@@ -348,8 +371,17 @@ class Model(object):
         non_pks = [f for f in meta.local_fields if not f.primary_key]
 
         # First, try an UPDATE. If that doesn't update anything, do an INSERT.
+
         pk_val = self._get_pk_val(meta)
-        pk_set = pk_val is not None
+        pk_set = bool(pk_val)
+        if pk_val:
+            if not hasattr(pk_val, '__iter__'):
+                pk_val = [pk_val]
+            for pk in pk_val:
+                if not pk:
+                    pk_set = False
+                    break
+
         record_exists = True
         manager = cls._default_manager
         if pk_set:
@@ -386,7 +418,13 @@ class Model(object):
                 result = manager._insert([(meta.pk, connection.ops.pk_default_value())], return_id=update_pk, raw_values=True)
 
             if update_pk:
-                setattr(self, meta.pk.attname, result)
+                # Find the AutoField
+                # TODO: this code is repeated in subqueries.py -- needs changed
+                attname = meta.pks[0].attname
+                for pk in meta.pks:
+                    if isinstance(pk, AutoField):
+                        attname = pk.attname
+                setattr(self, attname, result)
         transaction.commit_unless_managed()
 
         if signal:

@@ -8,6 +8,7 @@ from django.utils import dateformat
 from django.utils.text import capfirst
 from django.utils.translation import get_date_formats
 from django.utils.encoding import smart_unicode, smart_str, iri_to_uri
+from django.contrib.admin.models import PRIMARY_KEY_URL_SEPARATOR
 from django.utils.safestring import mark_safe
 from django.db.models.query import QuerySet
 
@@ -105,7 +106,7 @@ class EasyInstance(object):
         return self.instance._get_pk_val()
 
     def url(self):
-        return mark_safe('%s%s/%s/objects/%s/' % (self.model.site.root_url, self.model.model._meta.app_label, self.model.model._meta.module_name, iri_to_uri(self.pk())))
+        return mark_safe('%s%s/%s/objects/%s/' % (self.model.site.root_url, self.model.model._meta.app_label, self.model.model._meta.module_name, PRIMARY_KEY_URL_SEPARATOR.join(iri_to_uri(self.pk()))))
 
     def fields(self):
         """

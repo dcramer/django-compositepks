@@ -6,6 +6,8 @@ from django.utils.translation import ugettext_lazy as _
 from django.utils.encoding import smart_unicode
 from django.utils.safestring import mark_safe
 
+PRIMARY_KEY_URL_SEPARATOR = ','
+
 ADDITION = 1
 CHANGE = 2
 DELETION = 3

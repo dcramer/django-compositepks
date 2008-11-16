@@ -44,7 +44,7 @@ class WhereNode(tree.Node):
 
         alias, col, field, lookup_type, value = data
         try:
-            if field:
+            if isinstance(field, Field):
                 params = field.get_db_prep_lookup(lookup_type, value)
                 db_type = field.db_type()
             else:

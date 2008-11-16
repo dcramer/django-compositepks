@@ -7,6 +7,7 @@ from django.db.models.sql.constants import *
 from django.db.models.sql.datastructures import Date
 from django.db.models.sql.query import Query
 from django.db.models.sql.where import AND
+from django.db.models.fields import AutoField
 
 __all__ = ['DeleteQuery', 'UpdateQuery', 'InsertQuery', 'DateQuery',
         'CountQuery']
@@ -308,8 +309,14 @@ class InsertQuery(Query):
     def execute_sql(self, return_id=False):
         cursor = super(InsertQuery, self).execute_sql(None)
         if return_id:
+            # Find the AutoField
+            meta = self.model._meta
+            column = meta.pks[0].column
+            for pk in meta.pks:
+                if isinstance(pk, AutoField):
+                    column = pk.column
             return self.connection.ops.last_insert_id(cursor,
-                    self.model._meta.db_table, self.model._meta.pk.column)
+                    meta.db_table, column)
 
     def insert_values(self, insert_values, raw_values=False):
         """

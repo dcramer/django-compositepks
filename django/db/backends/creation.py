@@ -48,9 +48,7 @@ class BaseDatabaseCreation(object):
             field_output = [style.SQL_FIELD(qn(f.column)),
                 style.SQL_COLTYPE(col_type)]
             field_output.append(style.SQL_KEYWORD('%sNULL' % (not f.null and 'NOT ' or '')))
-            if f.primary_key:
-                field_output.append(style.SQL_KEYWORD('PRIMARY KEY'))
-            elif f.unique:
+            if f.unique and not f.primary_key:
                 field_output.append(style.SQL_KEYWORD('UNIQUE'))
             if tablespace and f.unique:
                 # We must specify the index tablespace inline, because we
@@ -67,6 +65,8 @@ class BaseDatabaseCreation(object):
             table_output.append(style.SQL_FIELD(qn('_order')) + ' ' + \
                 style.SQL_COLTYPE(models.IntegerField().db_type()) + ' ' + \
                 style.SQL_KEYWORD('NULL'))
+        table_output.append(style.SQL_KEYWORD('PRIMARY KEY') + ' (%s)' % \
+            ", ".join([style.SQL_FIELD(qn(f.column)) for f in opts.pks]))
         for field_constraints in opts.unique_together:
             table_output.append(style.SQL_KEYWORD('UNIQUE') + ' (%s)' % \
                 ", ".join([style.SQL_FIELD(qn(opts.get_field(f).column)) for f in field_constraints]))

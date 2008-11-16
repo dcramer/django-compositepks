@@ -11,7 +11,9 @@ from django.utils.encoding import smart_unicode, iri_to_uri
 from django.utils.translation import ugettext as _
 from django.utils.html import escape
 from django.utils.safestring import mark_safe
+from django.contrib.admin.models import PRIMARY_KEY_URL_SEPARATOR
 import datetime
+import itertools
 
 class FilterSpec(object):
     filter_specs = []
@@ -58,8 +60,9 @@ class RelatedFilterSpec(FilterSpec):
             self.lookup_title = f.rel.to._meta.verbose_name
         else:
             self.lookup_title = f.verbose_name
-        self.lookup_kwarg = '%s__%s__exact' % (f.name, f.rel.to._meta.pk.name)
-        self.lookup_val = request.GET.get(self.lookup_kwarg, None)
+        self.lookup_kwarg = '%s__exact' % (f.name,)
+        self.lookup_val = request.GET.get(self.lookup_kwarg, '').split(PRIMARY_KEY_URL_SEPARATOR)
+        self.lookup_val = filter(None, self.lookup_val)
         self.lookup_choices = f.get_choices(include_blank=False)
 
     def has_output(self):
@@ -69,12 +72,15 @@ class RelatedFilterSpec(FilterSpec):
         return self.lookup_title
 
     def choices(self, cl):
-        yield {'selected': self.lookup_val is None,
+        yield {'selected': not len(self.lookup_val),
                'query_string': cl.get_query_string({}, [self.lookup_kwarg]),
                'display': _('All')}
-        for pk_val, val in self.lookup_choices:
-            yield {'selected': self.lookup_val == smart_unicode(pk_val),
-                   'query_string': cl.get_query_string({self.lookup_kwarg: pk_val}),
+
+        for val in self.lookup_choices:
+            pk_val = [smart_unicode(getattr(val, f.attname)) for f in self.field.rel.to._meta.pks]
+            # TODO: fix for composites
+            yield {'selected': self.lookup_val == pk_val,
+                   'query_string': cl.get_query_string({self.lookup_kwarg: PRIMARY_KEY_URL_SEPARATOR.join(pk_val)}),
                    'display': val}
 
 FilterSpec.register(lambda f: bool(f.rel), RelatedFilterSpec)

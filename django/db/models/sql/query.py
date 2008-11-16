@@ -488,7 +488,6 @@ class BaseQuery(object):
             table_alias = start_alias
         else:
             table_alias = self.tables[0]
-        root_pk = opts.pk.column
         seen = {None: table_alias}
         qn = self.quote_name_unless_alias
         qn2 = self.connection.ops.quote_name
@@ -498,7 +497,7 @@ class BaseQuery(object):
                 alias = seen[model]
             except KeyError:
                 alias = self.join((table_alias, model._meta.db_table,
-                        root_pk, model._meta.pk.column))
+                   opts.pk.column, model._meta.pk.column))
                 seen[model] = alias
             if as_pairs:
                 result.append((alias, field.column))
@@ -1127,6 +1126,26 @@ class BaseQuery(object):
         alias = self.get_initial_alias()
         allow_many = trim or not negate
 
+        # Ugly hack to replace any "pk" names with their actual names
+        # We could put this in setup_joins to magically handle pk, but we run
+        # into the issue of separating it into many filters, and we need the value
+        # available.
+        if parts[-1] == 'pk':
+            if not hasattr(value, '__iter__'):
+                value = [value]
+            parts = parts[:-1]
+            for part in parts:
+                if hasattr(opts.get_field_by_name(part)[0], 'rel'):
+                    opts = opts.get_field_by_name(part)[0].rel.to._meta
+                else:
+                    opts = opts.get_field_by_name(part)[0].opts
+            self.where.start_subtree(connector)
+            for pk, value in zip(opts.pk.names, value):
+                filter_expr = "%s%s%s" % (LOOKUP_SEP.join(parts + [pk]), LOOKUP_SEP, lookup_type), value
+                self.add_filter(filter_expr, AND, negate, trim, can_reuse, process_extras)
+            self.where.end_subtree()
+            return
+        
         try:
             field, target, opts, join_list, last, extra_filters = self.setup_joins(
                     parts, opts, alias, True, allow_many, can_reuse=can_reuse,
@@ -1295,6 +1314,7 @@ class BaseQuery(object):
         dupe_set = set()
         exclusions = set()
         extra_filters = []
+
         for pos, name in enumerate(names):
             try:
                 exclusions.add(int_alias)
@@ -1302,8 +1322,6 @@ class BaseQuery(object):
                 pass
             exclusions.add(alias)
             last.append(len(joins))
-            if name == 'pk':
-                name = opts.pk.name
 
             try:
                 field, model, direct, m2m = opts.get_field_by_name(name)

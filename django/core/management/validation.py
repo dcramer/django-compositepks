@@ -23,6 +23,19 @@ def get_validation_errors(outfile, app=None):
     from django.db.models.loading import get_app_errors
     from django.db.models.fields.related import RelatedObject
 
+    def _check_field_tuple(opts, the_tuple, var_name):
+        """Verifies that all fields in opts.var_name are valid."""
+        for field_name in the_tuple:
+            try:
+                f = opts.get_field(field_name, many_to_many=True)
+            except models.FieldDoesNotExist:
+                e.add(opts, '"%s" refers to %s, a field that doesn\'t exist. Check your syntax.' % (var_name, field_name))
+            else:
+                if isinstance(f.rel, models.ManyToManyRel):
+                    e.add(opts, '"%s" refers to %s. ManyToManyFields are not supported in unique_together.' % (var_name, f.name))
+                if f not in opts.local_fields:
+                    e.add(opts, '"%s" refers to %s. This is not in the same model as the unique_together statement.' % (var_name, f.name))
+
     e = ModelErrorCollection(outfile)
 
     for (app_name, error) in get_app_errors().items():
@@ -33,7 +46,7 @@ def get_validation_errors(outfile, app=None):
 
         # Do field-specific validation.
         for f in opts.local_fields:
-            if f.name == 'id' and not f.primary_key and opts.pk.name == 'id':
+            if f.name == 'id' and not f.primary_key and 'id' not in [f.name for f in opts.pks]:
                 e.add(opts, '"%s": You can\'t use "id" as a field name, because each model automatically gets an "id" field if none of the fields have primary_key=True. You need to either remove/rename your "id" field or add primary_key=True to a field.' % f.name)
             if f.name.endswith('_'):
                 e.add(opts, '"%s": Field names cannot end with underscores, because this would lead to ambiguous queryset filters.' % f.name)
@@ -207,15 +220,9 @@ def get_validation_errors(outfile, app=None):
 
         # Check unique_together.
         for ut in opts.unique_together:
-            for field_name in ut:
-                try:
-                    f = opts.get_field(field_name, many_to_many=True)
-                except models.FieldDoesNotExist:
-                    e.add(opts, '"unique_together" refers to %s, a field that doesn\'t exist. Check your syntax.' % field_name)
-                else:
-                    if isinstance(f.rel, models.ManyToManyRel):
-                        e.add(opts, '"unique_together" refers to %s. ManyToManyFields are not supported in unique_together.' % f.name)
-                    if f not in opts.local_fields:
-                        e.add(opts, '"unique_together" refers to %s. This is not in the same model as the unique_together statement.' % f.name)
+            _check_field_tuple(opts, ut, 'unique_together')
+
+        # Check primary_key.
+        _check_field_tuple(opts, opts.primary_key, 'primary_key')
 
     return len(e.errors)

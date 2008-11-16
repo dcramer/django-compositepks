@@ -156,6 +156,191 @@ def sql_all(app, style):
     "Returns a list of CREATE TABLE SQL, initial-data inserts, and CREATE INDEX SQL for the given module."
     return sql_create(app, style) + sql_custom(app, style) + sql_indexes(app, style)
 
+def sql_model_create(model, style, known_models=set()):
+    """
+    Returns the SQL required to create a single model, as a tuple of:
+        (list_of_sql, pending_references_dict)
+    """
+    from django.db import connection, models
+
+    opts = model._meta
+    final_output = []
+    table_output = []
+    pending_references = {}
+    qn = connection.ops.quote_name
+    inline_references = connection.features.inline_fk_references
+    for f in opts.local_fields:
+        col_type = f.db_type()
+        tablespace = f.db_tablespace or opts.db_tablespace
+        if col_type is None:
+            # Skip ManyToManyFields, because they're not represented as
+            # database columns in this table.
+            continue
+        # Make the definition (e.g. 'foo VARCHAR(30)') for this field.
+        field_output = [style.SQL_FIELD(qn(f.column)),
+            style.SQL_COLTYPE(col_type)]
+        field_output.append(style.SQL_KEYWORD('%sNULL' % (not f.null and 'NOT ' or '')))
+        # Why do you have to check f.primary_key also?
+        if f.unique and not f.primary_key:
+            field_output.append(style.SQL_KEYWORD('UNIQUE'))
+        if tablespace and connection.features.supports_tablespaces and f.unique:
+            # We must specify the index tablespace inline, because we
+            # won't be generating a CREATE INDEX statement for this field.
+            field_output.append(connection.ops.tablespace_sql(tablespace, inline=True))
+        if f.rel:
+            if inline_references and f.rel.to in known_models:
+                field_output.append(style.SQL_KEYWORD('REFERENCES') + ' ' + \
+                    style.SQL_TABLE(qn(f.rel.to._meta.db_table)) + ' (' + \
+                    style.SQL_FIELD(qn(f.rel.to._meta.get_field(f.rel.field_name).column)) + ')' +
+                    connection.ops.deferrable_sql()
+                )
+            else:
+                # We haven't yet created the table to which this field
+                # is related, so save it for later.
+                pr = pending_references.setdefault(f.rel.to, []).append((model, f))
+        table_output.append(' '.join(field_output))
+    if opts.order_with_respect_to:
+        table_output.append(style.SQL_FIELD(qn('_order')) + ' ' + \
+            style.SQL_COLTYPE(models.IntegerField().db_type()) + ' ' + \
+            style.SQL_KEYWORD('NULL'))
+    # Handle primary keys last to support multiples
+    table_output.append(style.SQL_KEYWORD('PRIMARY KEY') + ' (%s)' % \
+        ", ".join([style.SQL_FIELD(qn(f.column)) for f in opts.pks]))
+    for field_constraints in opts.unique_together:
+        table_output.append(style.SQL_KEYWORD('UNIQUE') + ' (%s)' % \
+            ", ".join([style.SQL_FIELD(qn(opts.get_field(f).column)) for f in field_constraints]))
+
+    full_statement = [style.SQL_KEYWORD('CREATE TABLE') + ' ' + style.SQL_TABLE(qn(opts.db_table)) + ' (']
+    for i, line in enumerate(table_output): # Combine and add commas.
+        full_statement.append('    %s%s' % (line, i < len(table_output)-1 and ',' or ''))
+    full_statement.append(')')
+    if opts.db_tablespace and connection.features.supports_tablespaces:
+        full_statement.append(connection.ops.tablespace_sql(opts.db_tablespace))
+    full_statement.append(';')
+    final_output.append('\n'.join(full_statement))
+
+    if opts.has_auto_field:
+        # Add any extra SQL needed to support auto-incrementing primary keys.
+        auto_column = opts.auto_field.db_column or opts.auto_field.name
+        autoinc_sql = connection.ops.autoinc_sql(opts.db_table, auto_column)
+        if autoinc_sql:
+            for stmt in autoinc_sql:
+                final_output.append(stmt)
+
+    return final_output, pending_references
+
+def sql_for_pending_references(model, style, pending_references):
+    """
+    Returns any ALTER TABLE statements to add constraints after the fact.
+    """
+    from django.db import connection
+    from django.db.backends.util import truncate_name
+
+    qn = connection.ops.quote_name
+    final_output = []
+    if connection.features.supports_constraints:
+        opts = model._meta
+        if model in pending_references:
+            for rel_class, f in pending_references[model]:
+                rel_opts = rel_class._meta
+                r_table = rel_opts.db_table
+                r_col = f.column
+                table = opts.db_table
+                col = opts.get_field(f.rel.field_name).column
+                # For MySQL, r_name must be unique in the first 64 characters.
+                # So we are careful with character usage here.
+                r_name = '%s_refs_%s_%x' % (r_col, col, abs(hash((r_table, table))))
+                final_output.append(style.SQL_KEYWORD('ALTER TABLE') + ' %s ADD CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s (%s)%s;' % \
+                    (qn(r_table), truncate_name(r_name, connection.ops.max_name_length()),
+                    qn(r_col), qn(table), qn(col),
+                    connection.ops.deferrable_sql()))
+            del pending_references[model]
+    return final_output
+
+def many_to_many_sql_for_model(model, style):
+    from django.db import connection, models
+    from django.contrib.contenttypes import generic
+    from django.db.backends.util import truncate_name
+
+    opts = model._meta
+    final_output = []
+    qn = connection.ops.quote_name
+    inline_references = connection.features.inline_fk_references
+    for f in opts.local_many_to_many:
+        if f.creates_table:
+            tablespace = f.db_tablespace or opts.db_tablespace
+            if tablespace and connection.features.supports_tablespaces: 
+                tablespace_sql = ' ' + connection.ops.tablespace_sql(tablespace, inline=True)
+            else:
+                tablespace_sql = ''
+            table_output = [style.SQL_KEYWORD('CREATE TABLE') + ' ' + \
+                style.SQL_TABLE(qn(f.m2m_db_table())) + ' (']
+            table_output.append('    %s %s %s%s,' %
+                (style.SQL_FIELD(qn('id')),
+                style.SQL_COLTYPE(models.AutoField(primary_key=True).db_type()),
+                style.SQL_KEYWORD('NOT NULL PRIMARY KEY'),
+                tablespace_sql))
+            if inline_references:
+                # TODO:
+                deferred = []
+                table_output.append('    %s %s %s %s (%s)%s,' %
+                    (style.SQL_FIELD(qn(f.m2m_column_name())),
+                    style.SQL_COLTYPE(models.ForeignKey(model).db_type()),
+                    style.SQL_KEYWORD('NOT NULL REFERENCES'),
+                    style.SQL_TABLE(qn(opts.db_table)),
+                    style.SQL_FIELD(qn(opts.pk.column)),
+                    connection.ops.deferrable_sql()))
+                table_output.append('    %s %s %s %s (%s)%s,' %
+                    (style.SQL_FIELD(qn(f.m2m_reverse_name())),
+                    style.SQL_COLTYPE(models.ForeignKey(f.rel.to).db_type()),
+                    style.SQL_KEYWORD('NOT NULL REFERENCES'),
+                    style.SQL_TABLE(qn(f.rel.to._meta.db_table)),
+                    style.SQL_FIELD(qn(f.rel.to._meta.pk.column)),
+                    connection.ops.deferrable_sql()))
+            else:
+                table_output.append('    %s %s %s,' %
+                    (style.SQL_FIELD(qn(f.m2m_column_name())),
+                    style.SQL_COLTYPE(models.ForeignKey(model).db_type()),
+                    style.SQL_KEYWORD('NOT NULL')))
+                table_output.append('    %s %s %s,' %
+                    (style.SQL_FIELD(qn(f.m2m_reverse_name())),
+                    style.SQL_COLTYPE(models.ForeignKey(f.rel.to).db_type()),
+                    style.SQL_KEYWORD('NOT NULL')))
+                deferred = [
+                    (f.m2m_db_table(), f.m2m_column_name(), opts.db_table,
+                        opts.pk.column),
+                    ( f.m2m_db_table(), f.m2m_reverse_name(),
+                        f.rel.to._meta.db_table, f.rel.to._meta.pk.column)
+                    ]
+            table_output.append('    %s (%s, %s)%s' %
+                (style.SQL_KEYWORD('UNIQUE'),
+                style.SQL_FIELD(qn(f.m2m_column_name())),
+                style.SQL_FIELD(qn(f.m2m_reverse_name())),
+                tablespace_sql))
+            table_output.append(')')
+            if opts.db_tablespace and connection.features.supports_tablespaces:
+                # f.db_tablespace is only for indices, so ignore its value here.
+                table_output.append(connection.ops.tablespace_sql(opts.db_tablespace))
+            table_output.append(';')
+            final_output.append('\n'.join(table_output))
+
+            for r_table, r_col, table, col in deferred:
+                r_name = '%s_refs_%s_%x' % (r_col, col,
+                        abs(hash((r_table, table))))
+                final_output.append(style.SQL_KEYWORD('ALTER TABLE') + ' %s ADD CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s (%s)%s;' % 
+                (qn(r_table),
+                truncate_name(r_name, connection.ops.max_name_length()),
+                qn(r_col), qn(table), qn(col),
+                connection.ops.deferrable_sql()))
+
+            # Add any extra SQL needed to support auto-incrementing PKs
+            autoinc_sql = connection.ops.autoinc_sql(f.m2m_db_table(), 'id')
+            if autoinc_sql:
+                for stmt in autoinc_sql:
+                    final_output.append(stmt)
+
+    return final_output
+
 def custom_sql_for_model(model, style):
     from django.db import models
     from django.conf import settings

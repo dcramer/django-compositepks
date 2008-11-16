@@ -96,7 +96,7 @@ def validate(cls, model):
     # list_select_related = False
     # save_as = False
     # save_on_top = False
-    for attr in ('list_select_related', 'save_as', 'save_on_top'):
+    for attr in ('save_as', 'save_on_top'):
         if not isinstance(getattr(cls, attr), bool):
             raise ImproperlyConfigured("'%s.%s' should be a boolean."
                     % (cls.__name__, attr))

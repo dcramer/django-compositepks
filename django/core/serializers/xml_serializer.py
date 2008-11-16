@@ -83,7 +83,8 @@ class Serializer(base.Serializer):
         self._start_relational_field(field)
         related = getattr(obj, field.name)
         if related is not None:
-            if field.rel.field_name == related._meta.pk.name:
+            # TODO: can we remove the field_name part?
+            if field.rel.field_name in related._meta.pk.names:
                 # Related to remote object via primary key
                 related = related._get_pk_val()
             else:

@@ -23,6 +23,39 @@ DEFAULT_NAMES = ('verbose_name', 'db_table', 'ordering',
                  'order_with_respect_to', 'app_label', 'db_tablespace',
                  'abstract')
 
+class CompositePrimaryKey(list):
+    def __eq__(self, field_name):
+        return field_name in self.names
+    
+    def __repr__(self):
+        return '<%s: %s>' % (self.__class__.__name__, list.__repr__(self))
+
+    def __str__(self):
+        return self.name
+    
+    def __getattr__(self, key, value=None):
+        _reserved = ('names', 'attnames', 'append')
+        if key not in _reserved:
+            if len(self) == 1:
+                return getattr(self[0], key, value)
+            raise AttributeError, "'%s' is not accessible on '%s' objects" % (key, self.__class__.__name__,)
+        return list.__getattr__(self, key, value)
+    
+    def names(self):
+        return [f.name for f in self]
+    names = property(names)
+
+    def attnames(self):
+        return [f.attname for f in self]
+    attnames = property(attnames)
+
+    def append(self, field):
+        # Ensure the field is also marked with the primary_key attribute.
+        field.primary_key = True
+
+        if field not in self:
+            list.append(self, field)
+
 class Options(object):
     def __init__(self, meta, app_label=None):
         self.local_fields, self.local_many_to_many = [], []
@@ -40,6 +73,7 @@ class Options(object):
         self.admin = None
         self.meta = meta
         self.pk = None
+        self._primary_key = []
         self.has_auto_field, self.auto_field = False, None
         self.one_to_one_field = None
         self.abstract = False
@@ -59,10 +93,13 @@ class Options(object):
         self.object_name = cls.__name__
         self.module_name = self.object_name.lower()
         self.verbose_name = get_verbose_name(self.object_name)
-
+        self.pk = CompositePrimaryKey()
+        
         # Next, apply any overridden values from 'class Meta'.
         if self.meta:
             meta_attrs = self.meta.__dict__.copy()
+            # We have to delay setup of this because self.fields isn't populated yet
+            self._primary_key = meta_attrs.pop('primary_key', [])
             for name in self.meta.__dict__:
                 # Ignore any private attributes that Django doesn't care about.
                 # NOTE: We can't modify a dictionary's contents while looping
@@ -99,7 +136,6 @@ class Options(object):
             self.db_table = "%s_%s" % (self.app_label, self.module_name)
             self.db_table = truncate_name(self.db_table, connection.ops.max_name_length())
 
-
     def _prepare(self, model):
         if self.order_with_respect_to:
             self.order_with_respect_to = self.get_field(self.order_with_respect_to)
@@ -107,7 +143,13 @@ class Options(object):
         else:
             self.order_with_respect_to = None
 
-        if self.pk is None:
+
+        # Now we initialize the primary key.
+        for field_name in self._primary_key:
+            self.pk.append(self.get_field(field_name))
+        del self._primary_key
+
+        if not self.pk:
             if self.parents:
                 # Promote the first parent link in lieu of adding yet another
                 # field.
@@ -160,9 +202,18 @@ class Options(object):
         self.virtual_fields.append(field)
 
     def setup_pk(self, field):
-        if not self.pk and field.primary_key:
-            self.pk = field
+        if field.primary_key and field not in self.pk:
+            self.pk.append(field)
             field.serialize = False
+
+    def pks(self):
+        return tuple(self.pk)
+        self.primary_key = lambda x: x.pk.primary_key_names
+    pks = property(pks)
+    
+    def primary_key(self):
+        return self.pk.names
+    primary_key = property(primary_key)
 
     def __repr__(self):
         return '<Options for %s>' % self.object_name

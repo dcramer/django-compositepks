@@ -5,6 +5,7 @@ from django.forms.models import BaseInlineFormSet
 from django.contrib.contenttypes.models import ContentType
 from django.contrib.admin import widgets
 from django.contrib.admin import helpers
+from django.contrib.admin.models import PRIMARY_KEY_URL_SEPARATOR
 from django.contrib.admin.util import quote, unquote, flatten_fieldsets, get_deleted_objects
 from django.core.exceptions import PermissionDenied
 from django.db import models, transaction
@@ -15,6 +16,7 @@ from django.utils.safestring import mark_safe
 from django.utils.text import capfirst, get_text_list
 from django.utils.translation import ugettext as _
 from django.utils.encoding import force_unicode
+import itertools
 try:
     set
 except NameError:
@@ -190,11 +192,11 @@ class ModelAdmin(BaseModelAdmin):
         elif url == "add":
             return self.add_view(request)
         elif url.endswith('/history'):
-            return self.history_view(request, unquote(url[:-8]))
+            return self.history_view(request, [unquote(part) for part in url[:-8].split(PRIMARY_KEY_URL_SEPARATOR)])
         elif url.endswith('/delete'):
-            return self.delete_view(request, unquote(url[:-7]))
+            return self.delete_view(request, [unquote(part) for part in url[:-7].split(PRIMARY_KEY_URL_SEPARATOR)])
         else:
-            return self.change_view(request, unquote(url))
+            return self.change_view(request, [unquote(part) for part in url.split(PRIMARY_KEY_URL_SEPARATOR)])
 
     def _media(self):
         from django.conf import settings
@@ -401,6 +403,8 @@ class ModelAdmin(BaseModelAdmin):
             'save_on_top': self.save_on_top,
             'root_path': self.admin_site.root_path,
         })
+        if context['has_absolute_url']:
+            context['absolute_url'] = obj.get_absolute_url()
         return render_to_response(self.change_form_template or [
             "admin/%s/%s/change_form.html" % (app_label, opts.object_name.lower()),
             "admin/%s/change_form.html" % app_label,
@@ -545,7 +549,8 @@ class ModelAdmin(BaseModelAdmin):
         opts = model._meta
 
         try:
-            obj = model._default_manager.get(pk=object_id)
+            kwargs = dict([(pk.name, val) for pk, val in itertools.izip(opts.pks, object_id)])
+            obj = model._default_manager.get(**kwargs)
         except model.DoesNotExist:
             # Don't raise Http404 just yet, because we haven't checked
             # permissions yet. We don't want an unauthenticated user to be able

@@ -1,6 +1,7 @@
 from django.contrib.admin.filterspecs import FilterSpec
 from django.contrib.admin.options import IncorrectLookupParameters
 from django.contrib.admin.util import quote
+from django.contrib.admin.models import PRIMARY_KEY_URL_SEPARATOR
 from django.core.paginator import Paginator, InvalidPage
 from django.db import models
 from django.db.models.query import QuerySet
@@ -53,7 +54,7 @@ class ChangeList(object):
             self.page_num = 0
         self.show_all = ALL_VAR in request.GET
         self.is_popup = IS_POPUP_VAR in request.GET
-        self.to_field = request.GET.get(TO_FIELD_VAR)
+        self.to_field = request.GET.getlist(TO_FIELD_VAR)
         self.params = dict(request.GET.items())
         if PAGE_VAR in self.params:
             del self.params[PAGE_VAR]
@@ -68,7 +69,7 @@ class ChangeList(object):
         self.get_results(request)
         self.title = (self.is_popup and ugettext('Select %s') % force_unicode(self.opts.verbose_name) or ugettext('Select %s to change') % force_unicode(self.opts.verbose_name))
         self.filter_specs, self.has_filters = self.get_filters(request)
-        self.pk_attname = self.lookup_opts.pk.attname
+        self.pk = self.lookup_opts.pk
 
     def get_filters(self, request):
         filter_specs = []
@@ -135,7 +136,7 @@ class ChangeList(object):
         # options, then check the object's default ordering. If neither of
         # those exist, order descending by ID by default. Finally, look for
         # manually-specified ordering from the query string.
-        ordering = self.model_admin.ordering or lookup_opts.ordering or ['-' + lookup_opts.pk.name]
+        ordering = self.model_admin.ordering or lookup_opts.ordering or ['-' + lookup_opts.pk.names[0]]
 
         if ordering[0].startswith('-'):
             order_field, order_type = ordering[0][1:], 'desc'
@@ -197,9 +198,12 @@ class ChangeList(object):
 
         # Use select_related() if one of the list_display options is a field
         # with a relationship.
-        if self.list_select_related:
+        if isinstance(self.list_select_related, (tuple, list)):
+            qs = qs.select_related(*self.list_select_related)
+        elif self.list_select_related:
             qs = qs.select_related()
         else:
+            fields = []
             for field_name in self.list_display:
                 try:
                     f = self.lookup_opts.get_field(field_name)
@@ -207,9 +211,10 @@ class ChangeList(object):
                     pass
                 else:
                     if isinstance(f.rel, models.ManyToOneRel):
-                        qs = qs.select_related()
-                        break
-
+                        fields.append(f.name)
+            if fields:
+                qs = qs.select_related(*fields)
+        
         # Set ordering.
         if self.order_field:
             qs = qs.order_by('%s%s' % ((self.order_type == 'desc' and '-' or ''), self.order_field))
@@ -243,4 +248,4 @@ class ChangeList(object):
         return qs
 
     def url_for_result(self, result):
-        return "%s/" % quote(getattr(result, self.pk_attname))
+        return "%s/" % PRIMARY_KEY_URL_SEPARATOR.join([quote(force_unicode(getattr(result, pk))) for pk in self.pk.attnames])
