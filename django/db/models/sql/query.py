@@ -1131,7 +1131,7 @@ class BaseQuery(object):
         # into the issue of separating it into many filters, and we need the value
         # available.
         if parts[-1] == 'pk':
-            if not hasattr(value, '__iter__'):
+            if not hasattr(value, '__iter__') or lookup_type == 'in':
                 value = [value]
             parts = parts[:-1]
             for part in parts:
